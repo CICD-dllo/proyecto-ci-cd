@@ -175,9 +175,6 @@ Resources:
       DeploymentConfiguration:
         MinimumHealthyPercent: 50 # Permite que baje al 50% durante el deploy
         MaximumPercent: 200 # Permite que suba al 200% temporalmente
-        DeploymentCircuitBreaker:
-          Enable: true # Habilita el rollback automático
-          Rollback: true # Revierte automáticamente cuando falla un despliegue
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
