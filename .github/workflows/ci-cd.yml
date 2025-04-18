@@ -57,6 +57,8 @@ jobs:
           # Ejecuta solo pruebas unitarias, excluyendo aceptación y humo
           pytest --ignore=tests/test_acceptance_app.py  --ignore=tests/test_smoke_app.py  # Genera un informe XML para SonarCloud
 
+      # SE ELIMINAN DEL JOB DE CI EL PASO DE ACCEPTANCE TESTS, PASA AL JOB DE CD.
+
       # 7.1. Cargar reportes de cobertura y pruebas unitarias como artefactos
       - name: Upload Test Reports Artifacts
         uses: actions/upload-artifact@v4
@@ -67,7 +69,7 @@ jobs:
             htmlcov/
             report.html
 
-      # 8. Ejecutar análisis con SonarCloud
+      # 9. Ejecutar análisis con SonarCloud
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v5.0.0
         env:
@@ -117,20 +119,18 @@ jobs:
           echo "repo_name=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
 
+
   # -------------------------------------
   # Job de Despliegue CloudFormation Staging
   # -------------------------------------
   deploy-cfn-staging:
     needs: build-test-publish # Depende del job anterior (necesita image_uri)
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging' && github.event.inputs.rollback != 'true')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Solo en push a main
     outputs:
       alb_url_staging: ${{ steps.get_stack_outputs.outputs.alb_url }}
-      cluster_name_staging: "conversor-staging-cluster"
-      service_name_staging: "conversor-staging-service"
-      stack_name: "conversor-staging-stack"
+      cluster_name_staging: "calculadora-staging-cluster"
+      service_name_staging: "calculadora-staging-service"
 
     steps:
       # 1. Checkout del código (para acceder a template.yaml)
@@ -155,7 +155,7 @@ jobs:
 
           aws cloudformation deploy \
             --template-file template.yaml \
-            --stack-name conversor-staging-stack \
+            --stack-name calculadora-staging-stack \
             --parameter-overrides \
               EnvironmentName=staging \
               DockerImageUri=$IMAGE_URI \
@@ -174,7 +174,7 @@ jobs:
              sudo apt-get update && sudo apt-get install -y jq
           fi
 
-          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name conversor-staging-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
+          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name calculadora-staging-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
           echo "Raw Stack Outputs: $STACK_OUTPUTS" # Log para depuración
 
           # Extraer la URL del ALB (ALBDnsName)
@@ -197,9 +197,7 @@ jobs:
     # Depende de que CFN haya actualizado la Task Definition
     needs: [build-test-publish, deploy-cfn-staging]
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging' && github.event.inputs.rollback != 'true')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       # 1. Configurar credenciales de AWS (CON SESSION TOKEN)
@@ -230,9 +228,7 @@ jobs:
   test-staging:
     needs: [update-service-staging, deploy-cfn-staging] # Depende de que el servicio esté estable con la nueva versión
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging' && github.event.inputs.rollback != 'true')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       # 1. Checkout del código (para acceder a las pruebas)
@@ -253,125 +249,12 @@ jobs:
 
       # 4. Ejecutar pruebas de aceptación contra el entorno de Staging
       - name: Run Acceptance Tests against Staging
-        id: acceptance_tests
-        continue-on-error: true  # Permitir fallos para activar rollback
         env:
           APP_BASE_URL: ${{ needs.deploy-cfn-staging.outputs.alb_url_staging }} # URL del ALB de Staging desde salidas
         run: |
           echo "Running acceptance tests against: $APP_BASE_URL"
           sleep 30 # Espera prudencial para el registro del target en el ALB
           pytest tests/test_acceptance_app.py # Ejecutar las pruebas de aceptación
-      
-      # 5. Verificar resultado de pruebas y activar rollback si es necesario
-      - name: Check test results and trigger rollback if needed
-        if: steps.acceptance_tests.outcome == 'failure'
-        run: |
-          echo "Acceptance tests failed. Marking job as failed to trigger rollback."
-          exit 1
-
-  # -------------------------------------
-  # Job de Rollback para Staging
-  # -------------------------------------
-  rollback-staging:
-    needs: [deploy-cfn-staging, test-staging]
-    runs-on: ubuntu-latest
-    if: |
-      always() && 
-      (needs.test-staging.result == 'failure' || 
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging' && github.event.inputs.rollback == 'true'))
-    
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-      
-      # Obtener imagen anterior (para rollback)
-      - name: Get previous task definition
-        id: get_previous_task
-        run: |
-          CLUSTER_NAME="conversor-staging-cluster"
-          SERVICE_NAME="conversor-staging-service"
-          
-          TASK_DEF=$(aws ecs describe-services \
-            --cluster $CLUSTER_NAME \
-            --services $SERVICE_NAME \
-            --query 'services[0].taskDefinition' --output text)
-          
-          echo "current_task_def=${TASK_DEF}" >> $GITHUB_OUTPUT
-          
-          # Si se especificó una versión específica, usarla
-          if [ "${{ github.event.inputs.version }}" != "latest" ] && [ "${{ github.event.inputs.version }}" != "" ]; then
-            ROLLBACK_IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ github.event.inputs.version }}"
-          else
-            # De lo contrario, conseguir la penúltima versión del historial
-            TASK_HISTORY=$(aws ecs list-task-definitions \
-              --family-prefix conversor-staging-task \
-              --sort DESC \
-              --status ACTIVE \
-              --query 'taskDefinitionArns[1:3]' \
-              --output text)
-            
-            # Obtener la definición anterior si existe
-            if [ ! -z "$TASK_HISTORY" ]; then
-              PREVIOUS_TASK=$(echo $TASK_HISTORY | awk '{print $1}')
-              PREVIOUS_IMAGE=$(aws ecs describe-task-definition \
-                --task-definition $PREVIOUS_TASK \
-                --query 'taskDefinition.containerDefinitions[0].image' \
-                --output text)
-              
-              ROLLBACK_IMAGE=$PREVIOUS_IMAGE
-            else
-              echo "No se encontró versión anterior para rollback"
-              exit 1
-            fi
-          fi
-          
-          echo "rollback_image=${ROLLBACK_IMAGE}" >> $GITHUB_OUTPUT
-          echo "Realizando rollback a imagen: ${ROLLBACK_IMAGE}"
-      
-      # Realizar el rollback
-      - name: Execute rollback
-        run: |
-          CLUSTER_NAME="conversor-staging-cluster"
-          SERVICE_NAME="conversor-staging-service"
-          
-          # Registrar una nueva revisión de la task definition con la imagen anterior
-          TASK_DEF_JSON=$(aws ecs describe-task-definition \
-            --task-definition ${{ steps.get_previous_task.outputs.current_task_def }} \
-            --query 'taskDefinition' --output json)
-          
-          # Reemplazar la imagen en el JSON de la definición
-          ROLLBACK_IMAGE="${{ steps.get_previous_task.outputs.rollback_image }}"
-          TASK_DEF_JSON=$(echo $TASK_DEF_JSON | jq --arg IMG "$ROLLBACK_IMAGE" '.containerDefinitions[0].image = $IMG')
-          
-          # Eliminar campos no necesarios para register-task-definition
-          TASK_DEF_JSON=$(echo $TASK_DEF_JSON | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
-          
-          # Registrar la nueva task definition para rollback
-          NEW_TASK_DEF=$(aws ecs register-task-definition \
-            --cli-input-json "$TASK_DEF_JSON" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-          
-          # Actualizar el servicio para usar la task definition de rollback
-          aws ecs update-service \
-            --cluster $CLUSTER_NAME \
-            --service $SERVICE_NAME \
-            --task-definition $NEW_TASK_DEF \
-            --force-new-deployment
-          
-          echo "Rollback iniciado con la versión anterior: $ROLLBACK_IMAGE"
-          
-          # Esperar a que el despliegue se complete
-          aws ecs wait services-stable \
-            --cluster $CLUSTER_NAME \
-            --services $SERVICE_NAME
-          
-          echo "Rollback completado exitosamente"
 
   # -------------------------------------
   # Job de Despliegue CloudFormation Producción
@@ -379,14 +262,11 @@ jobs:
   deploy-cfn-prod:
     needs: [build-test-publish, test-staging] # Depende de la imagen y de que Staging esté OK
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test-staging.result == 'success') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production' && github.event.inputs.rollback != 'true')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs: # Definir salida para la URL del ALB de producción
       alb_url_prod: ${{ steps.get_stack_outputs.outputs.alb_url }}
-      cluster_name_prod: "conversor-production-cluster"
-      service_name_prod: "conversor-production-service"
-      stack_name: "conversor-prod-stack"
+      cluster_name_prod: "calculadora-production-cluster"
+      service_name_prod: "calculadora-production-service"
 
     steps:
       # 1. Checkout del código
@@ -411,7 +291,7 @@ jobs:
 
           aws cloudformation deploy \
             --template-file template.yaml \
-            --stack-name conversor-prod-stack \
+            --stack-name calculadora-prod-stack \
             --parameter-overrides \
               EnvironmentName=production \
               DockerImageUri=$IMAGE_URI \
@@ -430,7 +310,7 @@ jobs:
              sudo apt-get update && sudo apt-get install -y jq
           fi
 
-          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name conversor-prod-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
+          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name calculadora-prod-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
           echo "Raw Stack Outputs: $STACK_OUTPUTS" # Log
 
           # Extraer la URL del ALB (ALBDnsName)
@@ -452,9 +332,7 @@ jobs:
   update-service-prod:
     needs: [build-test-publish, deploy-cfn-prod] # Depende de que CFN haya actualizado la Task Def de Prod
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test-staging.result == 'success') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production' && github.event.inputs.rollback != 'true')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       # 1. Configurar credenciales de AWS (CON SESSION TOKEN)
@@ -485,9 +363,7 @@ jobs:
   smoke-test-prod:
     needs: [update-service-prod, deploy-cfn-prod] # Depende de que el servicio de prod esté estable
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test-staging.result == 'success') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production' && github.event.inputs.rollback != 'true')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       # 1. Checkout del código
@@ -508,8 +384,6 @@ jobs:
 
       # 4. Ejecutar pruebas de humo contra el entorno de Producción
       - name: Run Smoke Tests against Production
-        id: smoke_tests
-        continue-on-error: true  # Permitir fallos para activar rollback
         env:
           APP_BASE_URL: ${{ needs.deploy-cfn-prod.outputs.alb_url_prod }} # URL del ALB de Producción desde salidas
         run: |
