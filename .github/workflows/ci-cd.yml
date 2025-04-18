@@ -3,12 +3,12 @@ name: CI/CD Pipeline AWS ECS con CloudFormation
 
 # Disparadores del Workflow
 on:
-  # push:
-  #   branches:
-  #     - main # Se ejecuta en push a la rama main
-  # pull_request:
-  #   branches:
-  #     - main # Se ejecuta en pull requests hacia main
+  push:
+    branches:
+      - main # Se ejecuta en push a la rama main
+  pull_request:
+    branches:
+      - main # Se ejecuta en pull requests hacia main
   workflow_dispatch: # Permite ejecución manual desde la UI de GitHub Actions
 
 # Definición de los trabajos (Jobs)
