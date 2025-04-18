@@ -43,7 +43,8 @@ def index():
             unidad_origen = request.form["unidad_origen"]
             unidad_destino = request.form["unidad_destino"]
 
-            # Matriz de conversión - mapea combinaciones de origen y destino a funciones
+            # Matriz de conversión
+            # mapea combinaciones de origen y destino a funciones
             conversiones = {
                 ("segundos", "minutos"): conversor_tiempo.segundos_a_minutos,
                 ("segundos", "horas"): conversor_tiempo.segundos_a_horas,
@@ -67,11 +68,15 @@ def index():
                 funcion_conversion = conversiones[clave_conversion]
                 resultado_valor = funcion_conversion(valor)
                 resultado = (
-                    f"{valor} {unidad_origen} = {resultado_valor} {unidad_destino}"
+                    f"{valor} {unidad_origen} = "
+                    f"{resultado_valor} {unidad_destino}"
                 )
             elif unidad_origen == unidad_destino:
                 # Misma unidad, no hay conversión
-                resultado = f"{valor} {unidad_origen} = {valor} {unidad_destino}"
+                resultado = (
+                    f"{valor} {unidad_origen} = "
+                    f"{valor} {unidad_destino}"
+                )
             else:
                 resultado = "Error: Conversión no soportada"
 
