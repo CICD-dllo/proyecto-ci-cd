@@ -67,16 +67,12 @@ def index():
                 # Ejecutar la función de conversión correspondiente
                 funcion_conversion = conversiones[clave_conversion]
                 resultado_valor = funcion_conversion(valor)
-                resultado = (
-                    f"{valor} {unidad_origen} = "
-                    f"{resultado_valor} {unidad_destino}"
-                )
+                resultado = f"{valor} {unidad_origen} = "
+                resultado += f"{resultado_valor} {unidad_destino}"
             elif unidad_origen == unidad_destino:
                 # Misma unidad, no hay conversión
-                resultado = (
-                    f"{valor} {unidad_origen} = "
-                    f"{valor} {unidad_destino}"
-                )
+                resultado = f"{valor} {unidad_origen} = "
+                resultado += f"{valor} {unidad_destino}"
             else:
                 resultado = "Error: Conversión no soportada"
 
