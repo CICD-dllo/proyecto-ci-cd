@@ -463,7 +463,7 @@ jobs:
   rollback:
     name: Rollback
     runs-on: ubuntu-latest
-    if: github.event.inputs.rollback == 'true'
+    if: github.event.inputs.rollback == 'true' && github.event_name == 'workflow_dispatch'
     environment: ${{ github.event.inputs.environment || 'staging' }}
     steps:
       - name: Configure AWS credentials
