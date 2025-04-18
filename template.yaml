@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   CloudFormation template para desplegar la aplicacion conversor en ECS Fargate
-  con ALB. Usa la VPC por defecto y el LabRole existente.
+  con ALB. Incluye configuraciones optimizadas para soportar rollback.
 
 Parameters:
   EnvironmentName:
@@ -20,6 +20,24 @@ Parameters:
   SubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: Lista de al menos DOS IDs de subredes PuBLICAS de la VPC por defecto en diferentes AZs.
+  # Nuevos parámetros para optimizar rollbacks
+  DeploymentCircuitBreaker:
+    Type: String
+    Description: "Habilitar Circuit Breaker para detectar despliegues fallidos automáticamente"
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  MinimumHealthyPercent:
+    Type: Number
+    Description: "Porcentaje mínimo de tareas que deben estar en ejecución durante un despliegue"
+    Default: 100
+    MinValue: 0
+    MaxValue: 100
+  MaximumPercent:
+    Type: Number
+    Description: "Porcentaje máximo de tareas que pueden estar en ejecución durante un despliegue"
+    Default: 200
+    MinValue: 100
+    MaxValue: 200
 
 Resources:
   # --- Grupo de Logs para ECS ---
@@ -27,7 +45,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/ecs/conversor-${EnvironmentName}-task'
-      RetentionInDays: 7 # Retener logs por 7 días (ajusta si es necesario)
+      RetentionInDays: 30 # Aumentado a 30 días para mejor investigación de incidentes
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
@@ -37,9 +55,18 @@ Resources:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub 'conversor-${EnvironmentName}-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
 
   # --- Seguridad ---
   # Security Group para el Load Balancer (permite HTTP desde internet)
@@ -57,7 +84,7 @@ Resources:
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
-
+          
   # Security Group para el Servicio ECS (permite trafico desde el ALB en el puerto 8000)
   ECSServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -84,6 +111,11 @@ Resources:
         - !Ref ALBSecurityGroup
       Scheme: internet-facing
       Type: application
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
@@ -99,7 +131,7 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ECSTargetGroup
 
-# Target Group para las tareas ECS
+  # Target Group para las tareas ECS
   ECSTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -108,16 +140,21 @@ Resources:
       Port: 8000 # Puerto del contenedor
       Protocol: HTTP
       TargetType: ip # Necesario para Fargate
-      # --- Propiedades de Health Check (CORREGIDO) ---
+      # --- Propiedades de Health Check (Mejorado) ---
       HealthCheckEnabled: true
       HealthCheckPath: /health # Endpoint de health check de la app
       HealthCheckPort: '8000' # Puerto del contenedor
       HealthCheckProtocol: HTTP
       HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 2
-      HealthCheckIntervalSeconds: 15 # Nombre corregido
-      HealthCheckTimeoutSeconds: 5  # Nombre corregido
+      UnhealthyThresholdCount: 3
+      HealthCheckIntervalSeconds: 10 # Reducido para detectar problemas más rápido
+      HealthCheckTimeoutSeconds: 5
+      Matcher:
+        HttpCode: '200-299' # Acepta cualquier código 2xx como saludable
       # --- Fin Propiedades de Health Check ---
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20' # Reducido para permitir rollbacks más rápidos
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
@@ -138,13 +175,21 @@ Resources:
       ContainerDefinitions:
         - Name: !Sub 'conversor-${EnvironmentName}-container'
           Image: !Ref DockerImageUri # Imagen de Docker Hub
+          Essential: true
           PortMappings:
             - ContainerPort: 8000
               Protocol: tcp
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8000/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
           LogConfiguration:
             LogDriver: awslogs
             Options:
-              # Usar !Ref para hacer referencia al Log Group creado
               awslogs-group: !Ref ECSLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
@@ -159,8 +204,9 @@ Resources:
       ServiceName: !Sub 'conversor-${EnvironmentName}-service'
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref ECSTaskDefinition
-      DesiredCount: 1 # Numero inicial de tareas
+      DesiredCount: 2 # Aumentado a 2 para mejor disponibilidad durante despliegues
       LaunchType: FARGATE
+      PlatformVersion: LATEST # Usar la última versión de la plataforma Fargate
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED # Necesario en subredes publicas sin NAT Gateway
@@ -171,15 +217,66 @@ Resources:
         - ContainerName: !Sub 'conversor-${EnvironmentName}-container'
           ContainerPort: 8000
           TargetGroupArn: !Ref ECSTargetGroup
-      # DesiredCount y TaskDefinition se actualizan en despliegues posteriores
+      # Configuración mejorada para despliegues
       DeploymentConfiguration:
-        MinimumHealthyPercent: 50 # Permite que baje al 50% durante el deploy
-        MaximumPercent: 200 # Permite que suba al 200% temporalmente
+        MinimumHealthyPercent: !Ref MinimumHealthyPercent
+        MaximumPercent: !Ref MaximumPercent
+        DeploymentCircuitBreaker:
+          Enable: !Equals [!Ref DeploymentCircuitBreaker, "true"]
+          Rollback: !Equals [!Ref DeploymentCircuitBreaker, "true"]
+      # Estrategia de despliegue tipo blue/green
+      DeploymentController:
+        Type: ECS # Podríamos usar CODE_DEPLOY para Blue/Green completo
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
     DependsOn: # Asegura que el listener exista antes de crear el servicio
       - ALBListener
+
+  # --- Alarmas de CloudWatch para monitoreo ---
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-high-error-rate'
+      AlarmDescription: !Sub 'Alarma para detectar tasa alta de errores 5xx en ${EnvironmentName}'
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt ECSTargetGroup.TargetGroupFullName
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  HighContainerCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-high-cpu-utilization'
+      AlarmDescription: !Sub 'Alarma para detectar alto uso de CPU en ${EnvironmentName}'
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
 Outputs:
   ALBDnsName:
@@ -187,6 +284,11 @@ Outputs:
     Value: !GetAtt ApplicationLoadBalancer.DNSName
     Export:
       Name: !Sub '${AWS::StackName}-ALBDnsName'
+  ALBName:
+    Description: Name of the Application Load Balancer (for CloudWatch metrics)
+    Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBName'
   ECSClusterName:
     Description: Name of the ECS Cluster
     Value: !Ref ECSCluster
@@ -194,6 +296,16 @@ Outputs:
       Name: !Sub '${AWS::StackName}-ECSClusterName'
   ECSServiceName:
     Description: Name of the ECS Service
-    Value: !GetAtt ECSService.Name # Obtener el nombre completo del servicio
+    Value: !GetAtt ECSService.Name
     Export:
       Name: !Sub '${AWS::StackName}-ECSServiceName'
+  TaskDefinitionArn:
+    Description: ARN of the Task Definition
+    Value: !Ref ECSTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskDefinitionArn'
+  TargetGroupArn:
+    Description: ARN of the Target Group
+    Value: !Ref ECSTargetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupArn'
