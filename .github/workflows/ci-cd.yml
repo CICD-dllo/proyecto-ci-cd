@@ -1,5 +1,5 @@
 # Nombre del Workflow
-name: CI/CD Pipeline AWS ECS con CloudFormation y Rollback
+name: CI/CD Pipeline AWS ECS con CloudFormation
 
 # Disparadores del Workflow
 on:
@@ -10,24 +10,6 @@ on:
     branches:
       - main # Se ejecuta en pull requests hacia main
   workflow_dispatch: # Permite ejecución manual desde la UI de GitHub Actions
-    inputs:
-      rollback_action:
-        description: 'Acción de rollback'
-        required: false
-        type: choice
-        options:
-          - none
-          - rollback-staging
-          - rollback-production
-        default: 'none'
-      environment:
-        description: 'Entorno para rollback manual'
-        required: false
-        type: choice
-        options:
-          - staging
-          - production
-        default: 'staging'
 
 # Definición de los trabajos (Jobs)
 jobs:
@@ -74,6 +56,8 @@ jobs:
         run: |
           # Ejecuta solo pruebas unitarias, excluyendo aceptación y humo
           pytest --ignore=tests/test_acceptance_app.py  --ignore=tests/test_smoke_app.py  # Genera un informe XML para SonarCloud
+
+      # SE ELIMINAN DEL JOB DE CI EL PASO DE ACCEPTANCE TESTS, PASA AL JOB DE CD.
 
       # 7.1. Cargar reportes de cobertura y pruebas unitarias como artefactos
       - name: Upload Test Reports Artifacts
@@ -147,7 +131,6 @@ jobs:
       alb_url_staging: ${{ steps.get_stack_outputs.outputs.alb_url }}
       cluster_name_staging: "conversor-staging-cluster"
       service_name_staging: "conversor-staging-service"
-      previous_task_def: ${{ steps.get_current_task_def.outputs.current_task_def }}
 
     steps:
       # 1. Checkout del código (para acceder a template.yaml)
@@ -163,24 +146,7 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }} # <--- USO DEL SESSION TOKEN
           aws-region: us-east-1
 
-      # 3. Obtener la definición de tarea actual para rollback
-      - name: Get Current Task Definition
-        id: get_current_task_def
-        run: |
-          # Verificar si el servicio ya existe
-          SERVICE_EXISTS=$(aws ecs describe-services --cluster conversor-staging-cluster --services conversor-staging-service --query 'services[?status==`ACTIVE`]' --output text)
-          
-          if [ -n "$SERVICE_EXISTS" ]; then
-            # Obtener la definición de tarea actual
-            CURRENT_TASK_DEF=$(aws ecs describe-services --cluster conversor-staging-cluster --services conversor-staging-service --query 'services[0].taskDefinition' --output text)
-            echo "current_task_def=$CURRENT_TASK_DEF" >> $GITHUB_OUTPUT
-            echo "Current task definition found: $CURRENT_TASK_DEF"
-          else
-            echo "No existing service found. This must be the first deployment."
-            echo "current_task_def=none" >> $GITHUB_OUTPUT
-          fi
-
-      # 4. Desplegar/Actualizar el stack CloudFormation de Staging
+      # 3. Desplegar/Actualizar el stack CloudFormation de Staging
       - name: Deploy CloudFormation Staging Stack
         run: |
           # Reconstruir la URI de la imagen usando el secreto y las salidas separadas
@@ -199,7 +165,7 @@ jobs:
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changes # No falla si no hay cambios en la plantilla
 
-      # 5. Obtener las salidas del Stack CloudFormation Staging
+      # 4. Obtener las salidas del Stack CloudFormation Staging
       - name: Get Staging Stack Outputs
         id: get_stack_outputs
         run: |
@@ -263,8 +229,6 @@ jobs:
     needs: [update-service-staging, deploy-cfn-staging] # Depende de que el servicio esté estable con la nueva versión
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    outputs:
-      rollback_needed: ${{ steps.check_rollback.outputs.rollback_needed }}
 
     steps:
       # 1. Checkout del código (para acceder a las pruebas)
@@ -285,91 +249,12 @@ jobs:
 
       # 4. Ejecutar pruebas de aceptación contra el entorno de Staging
       - name: Run Acceptance Tests against Staging
-        id: run_tests
-        continue-on-error: true  # Permite continuar aunque fallen las pruebas
         env:
           APP_BASE_URL: ${{ needs.deploy-cfn-staging.outputs.alb_url_staging }} # URL del ALB de Staging desde salidas
         run: |
           echo "Running acceptance tests against: $APP_BASE_URL"
           sleep 30 # Espera prudencial para el registro del target en el ALB
           pytest tests/test_acceptance_app.py # Ejecutar las pruebas de aceptación
-          echo "test_status=$?" >> $GITHUB_OUTPUT
-
-      # 5. Determinar si se necesita rollback
-      - name: Determine if rollback is needed
-        id: check_rollback
-        run: |
-          if [ "${{ steps.run_tests.outputs.test_status }}" != "0" ]; then
-            echo "Tests failed, rollback required"
-            echo "rollback_needed=true" >> $GITHUB_OUTPUT
-          else
-            echo "Tests passed, proceed to production"
-            echo "rollback_needed=false" >> $GITHUB_OUTPUT
-          fi
-
-  # -------------------------------------
-  # Job de Rollback para Staging
-  # -------------------------------------
-  rollback-staging:
-    needs: [test-staging, deploy-cfn-staging, update-service-staging]
-    runs-on: ubuntu-latest
-    if: |
-      (needs.test-staging.outputs.rollback_needed == 'true') || 
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_action == 'rollback-staging')
-    
-    steps:
-      # 1. Configurar credenciales de AWS
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-          
-      # 2. Rollback del servicio ECS de Staging
-      - name: Rollback ECS Service Staging
-        run: |
-          if [[ "${{ needs.deploy-cfn-staging.outputs.previous_task_def }}" == "none" ]]; then
-            echo "No previous task definition found. This might be the first deployment."
-            echo "Cannot perform rollback."
-            exit 1
-          fi
-          
-          echo "Rolling back Staging service to previous task definition: ${{ needs.deploy-cfn-staging.outputs.previous_task_def }}"
-          
-          # Actualizar el servicio para usar la definición de tarea anterior
-          aws ecs update-service \
-            --cluster ${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }} \
-            --service ${{ needs.deploy-cfn-staging.outputs.service_name_staging }} \
-            --task-definition ${{ needs.deploy-cfn-staging.outputs.previous_task_def }} \
-            --force-new-deployment \
-            --region us-east-1
-            
-          # Esperar a que el rollback se estabilice
-          echo "Waiting for Staging service rollback to stabilize..."
-          aws ecs wait services-stable \
-            --cluster ${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }} \
-            --services ${{ needs.deploy-cfn-staging.outputs.service_name_staging }} \
-            --region us-east-1
-            
-          echo "Staging service rollback completed successfully."
-      
-      # 3. Verificar el estado del rollback
-      - name: Verify Rollback Success
-        run: |
-          # Verificar que el servicio esté usando la definición de tarea anterior
-          CURRENT_TASK_DEF=$(aws ecs describe-services \
-            --cluster ${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }} \
-            --services ${{ needs.deploy-cfn-staging.outputs.service_name_staging }} \
-            --query 'services[0].taskDefinition' --output text)
-            
-          if [ "$CURRENT_TASK_DEF" == "${{ needs.deploy-cfn-staging.outputs.previous_task_def }}" ]; then
-            echo "Rollback verification successful. Service is using the previous task definition."
-          else
-            echo "Rollback verification failed. Service is not using the expected task definition."
-            exit 1
-          fi
 
   # -------------------------------------
   # Job de Despliegue CloudFormation Producción
@@ -377,12 +262,11 @@ jobs:
   deploy-cfn-prod:
     needs: [build-test-publish, test-staging] # Depende de la imagen y de que Staging esté OK
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test-staging.outputs.rollback_needed != 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs: # Definir salida para la URL del ALB de producción
       alb_url_prod: ${{ steps.get_stack_outputs.outputs.alb_url }}
       cluster_name_prod: "conversor-production-cluster"
       service_name_prod: "conversor-production-service"
-      previous_task_def: ${{ steps.get_current_task_def.outputs.current_task_def }}
 
     steps:
       # 1. Checkout del código
@@ -398,24 +282,7 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }} # <--- USO DEL SESSION TOKEN
           aws-region: us-east-1
 
-      # 3. Obtener la definición de tarea actual para rollback
-      - name: Get Current Task Definition
-        id: get_current_task_def
-        run: |
-          # Verificar si el servicio ya existe
-          SERVICE_EXISTS=$(aws ecs describe-services --cluster conversor-production-cluster --services conversor-production-service --query 'services[?status==`ACTIVE`]' --output text)
-          
-          if [ -n "$SERVICE_EXISTS" ]; then
-            # Obtener la definición de tarea actual
-            CURRENT_TASK_DEF=$(aws ecs describe-services --cluster conversor-production-cluster --services conversor-production-service --query 'services[0].taskDefinition' --output text)
-            echo "current_task_def=$CURRENT_TASK_DEF" >> $GITHUB_OUTPUT
-            echo "Current task definition found: $CURRENT_TASK_DEF"
-          else
-            echo "No existing service found. This must be the first deployment."
-            echo "current_task_def=none" >> $GITHUB_OUTPUT
-          fi
-
-      # 4. Desplegar/Actualizar el stack CloudFormation de Producción
+      # 3. Desplegar/Actualizar el stack CloudFormation de Producción
       - name: Deploy CloudFormation Production Stack
         run: |
           # Reconstruir la URI de la imagen usando el secreto y las salidas separadas
@@ -434,7 +301,7 @@ jobs:
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changes
 
-      # 5. Obtener las salidas del Stack CloudFormation Producción
+      # 4. Obtener las salidas del Stack CloudFormation Producción
       - name: Get Production Stack Outputs
         id: get_stack_outputs
         run: |
@@ -465,7 +332,7 @@ jobs:
   update-service-prod:
     needs: [build-test-publish, deploy-cfn-prod] # Depende de que CFN haya actualizado la Task Def de Prod
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test-staging.outputs.rollback_needed != 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       # 1. Configurar credenciales de AWS (CON SESSION TOKEN)
@@ -496,9 +363,7 @@ jobs:
   smoke-test-prod:
     needs: [update-service-prod, deploy-cfn-prod] # Depende de que el servicio de prod esté estable
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test-staging.outputs.rollback_needed != 'true'
-    outputs:
-      rollback_needed: ${{ steps.check_rollback.outputs.rollback_needed }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       # 1. Checkout del código
@@ -519,228 +384,9 @@ jobs:
 
       # 4. Ejecutar pruebas de humo contra el entorno de Producción
       - name: Run Smoke Tests against Production
-        id: run_tests
-        continue-on-error: true  # Permite continuar aunque fallen las pruebas
         env:
           APP_BASE_URL: ${{ needs.deploy-cfn-prod.outputs.alb_url_prod }} # URL del ALB de Producción desde salidas
         run: |
           echo "Running smoke tests against: $APP_BASE_URL"
           sleep 30 # Espera prudencial
           pytest tests/test_smoke_app.py # Ejecutar las pruebas de humo
-          echo "test_status=$?" >> $GITHUB_OUTPUT
-
-      # 5. Determinar si se necesita rollback
-      - name: Determine if rollback is needed
-        id: check_rollback
-        run: |
-          if [ "${{ steps.run_tests.outputs.test_status }}" != "0" ]; then
-            echo "Tests failed, rollback required"
-            echo "rollback_needed=true" >> $GITHUB_OUTPUT
-          else
-            echo "Tests passed, deployment successful"
-            echo "rollback_needed=false" >> $GITHUB_OUTPUT
-          fi
-      
-  # -------------------------------------
-  # Job de Rollback para Producción
-  # -------------------------------------
-  rollback-production:
-    needs: [smoke-test-prod, deploy-cfn-prod, update-service-prod]
-    runs-on: ubuntu-latest
-    if: |
-      (needs.smoke-test-prod.outputs.rollback_needed == 'true') || 
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_action == 'rollback-production')
-    
-    steps:
-      # 1. Configurar credenciales de AWS
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-          
-      # 2. Rollback del servicio ECS de Producción
-      - name: Rollback ECS Service Production
-        run: |
-          if [[ "${{ needs.deploy-cfn-prod.outputs.previous_task_def }}" == "none" ]]; then
-            echo "No previous task definition found. This might be the first deployment."
-            echo "Cannot perform rollback."
-            exit 1
-          fi
-          
-          echo "Rolling back Production service to previous task definition: ${{ needs.deploy-cfn-prod.outputs.previous_task_def }}"
-          
-          # Actualizar el servicio para usar la definición de tarea anterior
-          aws ecs update-service \
-            --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
-            --service ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} \
-            --task-definition ${{ needs.deploy-cfn-prod.outputs.previous_task_def }} \
-            --force-new-deployment \
-            --region us-east-1
-            
-          # Esperar a que el rollback se estabilice
-          echo "Waiting for Production service rollback to stabilize..."
-          aws ecs wait services-stable \
-            --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
-            --services ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} \
-            --region us-east-1
-            
-          echo "Production service rollback completed successfully."
-      
-      # 3. Verificar el estado del rollback
-      - name: Verify Rollback Success
-        run: |
-          # Verificar que el servicio esté usando la definición de tarea anterior
-          CURRENT_TASK_DEF=$(aws ecs describe-services \
-            --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
-            --services ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} \
-            --query 'services[0].taskDefinition' --output text)
-            
-          if [ "$CURRENT_TASK_DEF" == "${{ needs.deploy-cfn-prod.outputs.previous_task_def }}" ]; then
-            echo "Rollback verification successful. Service is using the previous task definition."
-          else
-            echo "Rollback verification failed. Service is not using the expected task definition."
-            exit 1
-          fi
-
-  # -------------------------------------
-  # Job de rollback manual específico (para casos especiales)
-  # -------------------------------------
-  manual-specific-rollback:
-    runs-on: ubuntu-latest
-    # Solo se ejecuta cuando se activa manualmente desde la UI con modo específico
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_action == 'none' && github.event.inputs.environment != ''
-    
-    steps:
-      # 1. Checkout del código
-      - name: Checkout code
-        uses: actions/checkout@v4
-        
-      # 2. Configurar credenciales de AWS
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-      
-      # 3. Obtener la tarea anterior para el entorno seleccionado
-      - name: Get Previous Task Definition
-        id: get_previous_task
-        run: |
-          if [ "${{ github.event.inputs.environment }}" == "staging" ]; then
-            CLUSTER_NAME="conversor-staging-cluster"
-            SERVICE_NAME="conversor-staging-service"
-          else
-            CLUSTER_NAME="conversor-production-cluster"
-            SERVICE_NAME="conversor-production-service"
-          fi
-          
-          # Obtener la definición de tarea actual
-          CURRENT_TASK_DEF=$(aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --query 'services[0].taskDefinition' --output text)
-          
-          # Extraer familia y revisión
-          TASK_FAMILY=$(echo $CURRENT_TASK_DEF | cut -d':' -f1-6)
-          TASK_REVISION=$(echo $CURRENT_TASK_DEF | cut -d':' -f7)
-          
-          # Calcular la revisión anterior
-          PREV_REVISION=$((TASK_REVISION - 1))
-          
-          # Verificar que existe la revisión anterior
-          if [ $PREV_REVISION -le 0 ]; then
-            echo "No previous task definition revision found!"
-            exit 1
-          fi
-          
-          PREVIOUS_TASK_DEF="${TASK_FAMILY}:${PREV_REVISION}"
-          echo "Previous task definition: $PREVIOUS_TASK_DEF"
-          echo "previous_task_def=$PREVIOUS_TASK_DEF" >> $GITHUB_OUTPUT
-          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
-          echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
-      
-      # 4. Ejecutar el rollback
-      - name: Execute Manual Rollback
-        run: |
-          echo "Rolling back ${{ github.event.inputs.environment }} to previous task definition: ${{ steps.get_previous_task.outputs.previous_task_def }}"
-          
-          # Actualizar el servicio a la versión anterior
-          aws ecs update-service \
-            --cluster ${{ steps.get_previous_task.outputs.cluster_name }} \
-            --service ${{ steps.get_previous_task.outputs.service_name }} \
-            --task-definition ${{ steps.get_previous_task.outputs.previous_task_def }} \
-            --force-new-deployment \
-            --region us-east-1
-            
-          # Esperar a que se estabilice
-          echo "Waiting for service to stabilize after rollback..."
-          aws ecs wait services-stable \
-            --cluster ${{ steps.get_previous_task.outputs.cluster_name }} \
-            --services ${{ steps.get_previous_task.outputs.service_name }} \
-            --region us-east-1
-            
-          echo "Manual rollback to ${{ github.event.inputs.environment }} completed successfully."
-          
-  # -------------------------------------
-  # Job de monitoreo post-despliegue producción
-  # -------------------------------------
-  monitor-production:
-    needs: [smoke-test-prod, update-service-prod]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.smoke-test-prod.outputs.rollback_needed != 'true'
-    
-    steps:
-      # 1. Configurar credenciales de AWS
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-          
-      # 2. Monitorear la salud de la aplicación
-      - name: Monitor Application Health
-        run: |
-          # Obtener el nombre del ALB
-          ALB_NAME=$(aws cloudformation describe-stacks --stack-name conversor-prod-stack --query "Stacks[0].Outputs[?OutputKey=='ALBName'].OutputValue" --output text)
-          
-          if [ -z "$ALB_NAME" ]; then
-            echo "No se pudo obtener el nombre del ALB de producción."
-            exit 1
-          fi
-          
-          echo "Monitoring ALB: $ALB_NAME"
-          
-          # Monitorear métricas de CloudWatch por 5 minutos
-          END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          START_TIME=$(date -u -d "5 minutes ago" +"%Y-%m-%dT%H:%M:%SZ")
-          
-          # Verificar tasa de errores 5xx
-          ERROR_COUNT=$(aws cloudwatch get-metric-statistics \
-            --metric-name HTTPCode_Target_5XX_Count \
-            --start-time $START_TIME \
-            --end-time $END_TIME \
-            --period 300 \
-            --namespace AWS/ApplicationELB \
-            --statistics Sum \
-            --dimensions Name=LoadBalancer,Value=$ALB_NAME \
-            --query "Datapoints[0].Sum" --output text || echo "0")
-            
-          if [ -z "$ERROR_COUNT" ]; then
-            ERROR_COUNT=0
-          fi
-          
-          echo "5XX Error Count in last 5 minutes: $ERROR_COUNT"
-          
-          # Umbral de errores configurable
-          ERROR_THRESHOLD=5
-          
-          if (( $(echo "$ERROR_COUNT > $ERROR_THRESHOLD" | bc -l) )); then
-            echo "¡Alerta! Tasa de errores elevada detectada en producción."
-            echo "Se recomienda revisar los logs y considerar un rollback manual si persiste."
-          else
-            echo "Monitoreo completado. La aplicación funciona correctamente."
-          fi
