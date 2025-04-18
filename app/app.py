@@ -3,7 +3,7 @@
 Módulo principal de la aplicación de conversión de unidades de tiempo.
 
 Este módulo implementa una aplicación web Flask que proporciona una
-interfaz para realizar conversiones entre diferentes unidades de tiempo. 
+interfaz para realizar conversiones entre diferentes unidades de tiempo.
 La aplicación maneja solicitudes GET y POST, procesa los datos del formulario y
 muestra los resultados de la conversión.
 
@@ -66,7 +66,9 @@ def index():
                 # Ejecutar la función de conversión correspondiente
                 funcion_conversion = conversiones[clave_conversion]
                 resultado_valor = funcion_conversion(valor)
-                resultado = f"{valor} {unidad_origen} = {resultado_valor} {unidad_destino}"
+                resultado = (
+                    f"{valor} {unidad_origen} = {resultado_valor} {unidad_destino}"
+                )
             elif unidad_origen == unidad_destino:
                 # Misma unidad, no hay conversión
                 resultado = f"{valor} {unidad_origen} = {valor} {unidad_destino}"
