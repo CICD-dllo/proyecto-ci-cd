@@ -1,6 +1,6 @@
 # Conversor de Unidades de Tiempo - Proyecto CI/CD
 
-Este proyecto implementa un conversor de unidades de tiempo web utilizando Flask, con un pipeline completo de integración continua y despliegue continuo (CI/CD).
+Este proyecto implementa un conversor de unidades de tiempo web utilizando Flask, con un pipeline completo de integración continua y despliegue continuo (CI/CD). 
 
 ## Funcionalidades
 
