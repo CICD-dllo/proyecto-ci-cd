@@ -81,7 +81,7 @@ def index():
 
     return render_template("index.html", resultado=resultado)
 
-# Endpoint de verificación de salud
+
 @app.route("/health")
 def health():
     """
