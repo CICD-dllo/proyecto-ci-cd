@@ -31,7 +31,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12' # Especificar versión de Python
+          python-version: "3.12" # Especificar versión de Python
 
       # 3. Instalar dependencias de Python
       - name: Install dependencies
@@ -73,8 +73,8 @@ jobs:
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v5.0.0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Automáticamente proporcionado
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   # El secreto que creaste
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Automáticamente proporcionado
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }} # El secreto que creaste
 
       # --- Pasos de Docker (solo en push a main) ---
 
@@ -118,7 +118,6 @@ jobs:
         run: |
           echo "repo_name=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
-
 
   # -------------------------------------
   # Job de Despliegue CloudFormation Staging
@@ -239,7 +238,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       # 3. Instalar dependencias de prueba
       - name: Install test dependencies
@@ -374,7 +373,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       # 3. Instalar dependencias de prueba
       - name: Install test dependencies
@@ -390,3 +389,91 @@ jobs:
           echo "Running smoke tests against: $APP_BASE_URL"
           sleep 30 # Espera prudencial
           pytest tests/test_smoke_app.py # Ejecutar las pruebas de humo
+
+  # -------------------------------------
+  # Job de Rollback Manual para Producción
+  # -------------------------------------
+  rollback-prod:
+    needs: [deploy-cfn-prod]
+    runs-on: ubuntu-latest
+    if: failure() && contains(github.event.head_commit.message, '[rollback]')
+
+    steps:
+      # 1. Configurar credenciales de AWS
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      # 2. Obtener la Task Definition anterior
+      - name: Get Previous Task Definition
+        id: get_prev_task_def
+        run: |
+          # Obtiene el ARN de la Task Definition actual
+          TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
+            --services ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} \
+            --query "services[0].taskDefinition" \
+            --output text)
+
+          echo "Current Task Definition ARN: $TASK_DEF_ARN"
+
+          # Extrae el nombre de la familia (sin revisión)
+          TASK_DEF_FAMILY=$(echo $TASK_DEF_ARN | cut -d '/' -f 2 | cut -d ':' -f 1)
+          echo "Task Definition Family: $TASK_DEF_FAMILY"
+
+          # Obtiene la revisión actual
+          CURRENT_REVISION=$(echo $TASK_DEF_ARN | cut -d ':' -f 2)
+          echo "Current Revision: $CURRENT_REVISION"
+
+          # Calcula la revisión anterior
+          PREV_REVISION=$((CURRENT_REVISION - 1))
+          echo "Previous Revision: $PREV_REVISION"
+
+          if [ $PREV_REVISION -lt 1 ]; then
+            echo "Error: No hay versión anterior disponible para rollback."
+            exit 1
+          fi
+
+          # Construye el ARN de la Task Definition anterior
+          PREV_TASK_DEF_ARN="arn:aws:ecs:us-east-1:$(aws sts get-caller-identity --query 'Account' --output text):task-definition/$TASK_DEF_FAMILY:$PREV_REVISION"
+          echo "Previous Task Definition ARN: $PREV_TASK_DEF_ARN"
+          echo "prev_task_def_arn=$PREV_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
+      # 3. Ejecutar el rollback en el servicio de producción
+      - name: Rollback ECS Service to Previous Version
+        run: |
+          echo "Performing rollback to previous Task Definition revision..."
+          aws ecs update-service \
+            --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
+            --service ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} \
+            --task-definition ${{ steps.get_prev_task_def.outputs.prev_task_def_arn }} \
+            --force-new-deployment
+
+          # Esperar a que el rollback se estabilice
+          echo "Waiting for rollback operation to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
+            --services ${{ needs.deploy-cfn-prod.outputs.service_name_prod }}
+          echo "Rollback completed successfully."
+
+      # 4. Verificar estado después del rollback
+      - name: Verify Rollback Status
+        run: |
+          # Obtiene el estado actual del servicio para verificar
+          SERVICE_INFO=$(aws ecs describe-services \
+            --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
+            --services ${{ needs.deploy-cfn-prod.outputs.service_name_prod }})
+
+          # Extrae y muestra la información relevante
+          echo "Service Status after rollback:"
+          echo "$SERVICE_INFO" | jq -r '.services[0].status'
+          echo "Running Count:"
+          echo "$SERVICE_INFO" | jq -r '.services[0].runningCount'
+          echo "Desired Count:"
+          echo "$SERVICE_INFO" | jq -r '.services[0].desiredCount'
+          echo "Current Task Definition:"
+          echo "$SERVICE_INFO" | jq -r '.services[0].taskDefinition'
