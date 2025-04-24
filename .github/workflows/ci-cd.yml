@@ -450,10 +450,15 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      # 2. Obtener la Task Definition anterior
-      - name: Get Previous Task Definition
+      # 2. Obtener la Task Definition anterior y registrar una nueva
+      - name: Get Previous Task Definition and Register New One
         id: get_prev_task_def
         run: |
+          # Instalar jq para el procesamiento JSON
+          if ! command -v jq &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
           # Obtiene el ARN de la Task Definition actual
           TASK_DEF_ARN=$(aws ecs describe-services \
             --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
@@ -463,11 +468,11 @@ jobs:
 
           echo "Current Task Definition ARN: $TASK_DEF_ARN"
 
-          # Extrae el nombre de la familia (sin revisión)
+          # Extrae el nombre de la familia
           TASK_DEF_FAMILY=$(echo $TASK_DEF_ARN | cut -d '/' -f 2 | cut -d ':' -f 1)
           echo "Task Definition Family: $TASK_DEF_FAMILY"
 
-          # Extraer la revisión de forma más robusta
+          # Extraer la revisión actual de forma robusta
           CURRENT_REVISION=$(echo $TASK_DEF_ARN | awk -F':' '{print $NF}')
 
           # Verificar que es un número
@@ -485,19 +490,38 @@ jobs:
             exit 1
           fi
 
-          # Construye el ARN de la Task Definition anterior
-          PREV_TASK_DEF_ARN="arn:aws:ecs:us-east-1:$(aws sts get-caller-identity --query 'Account' --output text):task-definition/$TASK_DEF_FAMILY:$PREV_REVISION"
-          echo "Previous Task Definition ARN: $PREV_TASK_DEF_ARN"
-          echo "prev_task_def_arn=$PREV_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          # Obtener la definición de la tarea anterior
+          echo "Retrieving previous task definition details..."
+          PREV_TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${TASK_DEF_FAMILY}:${PREV_REVISION} \
+            --query "taskDefinition" \
+            --output json)
+            
+          echo "Got previous task definition"
 
-      # 3. Ejecutar el rollback en el servicio de producción
+          # Eliminar campos que no se deben incluir al registrar una nueva tarea
+          echo "Cleaning task definition for registration..."
+          CLEANED_TASK_DEF=$(echo $PREV_TASK_DEF | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+
+          echo "Creating new task definition from previous version"
+
+          # Registrar una nueva tarea basada en la anterior
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$CLEANED_TASK_DEF" \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)
+            
+          echo "Registered new task definition: $NEW_TASK_DEF_ARN"
+          echo "new_task_def_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
+      # 3. Ejecutar el rollback con la nueva Task Definition
       - name: Rollback ECS Service to Previous Version
         run: |
-          echo "Performing rollback to previous Task Definition revision..."
+          echo "Performing rollback using newly registered task definition..."
           aws ecs update-service \
             --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
             --service ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} \
-            --task-definition ${{ steps.get_prev_task_def.outputs.prev_task_def_arn }} \
+            --task-definition ${{ steps.get_prev_task_def.outputs.new_task_def_arn }} \
             --force-new-deployment
 
           # Esperar a que el rollback se estabilice
