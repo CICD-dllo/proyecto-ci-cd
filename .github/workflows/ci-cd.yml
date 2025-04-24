@@ -436,7 +436,7 @@ jobs:
   # Job de Rollback Manual para Producción
   # -------------------------------------
   rollback-prod:
-    needs: [deploy-cfn-prod, update-service-prod]
+    needs: [deploy-cfn-prod, update-service-prod, smoke-test-prod]
     runs-on: ubuntu-latest
     if: failure() && contains(github.event.head_commit.message, '[rollback]')
 
