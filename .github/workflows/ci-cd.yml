@@ -467,9 +467,14 @@ jobs:
           TASK_DEF_FAMILY=$(echo $TASK_DEF_ARN | cut -d '/' -f 2 | cut -d ':' -f 1)
           echo "Task Definition Family: $TASK_DEF_FAMILY"
 
-          # Obtiene la revisión actual
-          CURRENT_REVISION=$(echo $TASK_DEF_ARN | cut -d ':' -f 2)
-          echo "Current Revision: $CURRENT_REVISION"
+          # Extraer la revisión de forma más robusta
+          CURRENT_REVISION=$(echo $TASK_DEF_ARN | awk -F':' '{print $NF}')
+
+          # Verificar que es un número
+          if ! [[ "$CURRENT_REVISION" =~ ^[0-9]+$ ]]; then
+            echo "Error: No se pudo extraer un número de revisión válido del ARN de la tarea."
+            exit 1
+          fi
 
           # Calcula la revisión anterior
           PREV_REVISION=$((CURRENT_REVISION - 1))
