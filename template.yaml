@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: "2010-09-09"
+AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   CloudFormation template para desplegar la aplicacion conversor en ECS Fargate
   con ALB. Usa la VPC por defecto y el LabRole existente.
@@ -26,7 +26,7 @@ Resources:
   ECSLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/ecs/conversor-${EnvironmentName}-task"
+      LogGroupName: !Sub '/ecs/conversor-${EnvironmentName}-task'
       RetentionInDays: 7 # Retener logs por 7 días (ajusta si es necesario)
       Tags:
         - Key: Environment
@@ -36,7 +36,7 @@ Resources:
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Sub "conversor-${EnvironmentName}-cluster"
+      ClusterName: !Sub 'conversor-${EnvironmentName}-cluster'
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
@@ -46,7 +46,7 @@ Resources:
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub "alb-sg-${EnvironmentName}"
+      GroupName: !Sub 'alb-sg-${EnvironmentName}'
       GroupDescription: Permite trafico HTTP al ALB
       VpcId: !Ref VpcId
       SecurityGroupIngress:
@@ -62,7 +62,7 @@ Resources:
   ECSServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub "ecs-service-sg-${EnvironmentName}"
+      GroupName: !Sub 'ecs-service-sg-${EnvironmentName}'
       GroupDescription: Permite trafico desde el ALB al servicio ECS
       VpcId: !Ref VpcId
       SecurityGroupIngress:
@@ -78,7 +78,7 @@ Resources:
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Sub "conversor-${EnvironmentName}-alb"
+      Name: !Sub 'conversor-${EnvironmentName}-alb'
       Subnets: !Ref SubnetIds # Debe estar en subredes publicas
       SecurityGroups:
         - !Ref ALBSecurityGroup
@@ -99,11 +99,11 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ECSTargetGroup
 
-  # Target Group para las tareas ECS
+# Target Group para las tareas ECS
   ECSTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub "tg-ecs-${EnvironmentName}"
+      Name: !Sub 'tg-ecs-${EnvironmentName}'
       VpcId: !Ref VpcId
       Port: 8000 # Puerto del contenedor
       Protocol: HTTP
@@ -111,12 +111,12 @@ Resources:
       # --- Propiedades de Health Check (CORREGIDO) ---
       HealthCheckEnabled: true
       HealthCheckPath: /health # Endpoint de health check de la app
-      HealthCheckPort: "8000" # Puerto del contenedor
+      HealthCheckPort: '8000' # Puerto del contenedor
       HealthCheckProtocol: HTTP
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 2
       HealthCheckIntervalSeconds: 15 # Nombre corregido
-      HealthCheckTimeoutSeconds: 5 # Nombre corregido
+      HealthCheckTimeoutSeconds: 5  # Nombre corregido
       # --- Fin Propiedades de Health Check ---
       Tags:
         - Key: Environment
@@ -127,16 +127,16 @@ Resources:
     Type: AWS::ECS::TaskDefinition
     DependsOn: ECSLogGroup # Asegura que el Log Group exista primero
     Properties:
-      Family: !Sub "conversor-${EnvironmentName}-task"
+      Family: !Sub 'conversor-${EnvironmentName}-task'
       RequiresCompatibilities:
         - FARGATE
       NetworkMode: awsvpc
-      Cpu: "256" # 0.25 vCPU (minimo Fargate)
-      Memory: "512" # 0.5 GB (minimo Fargate)
+      Cpu: '256' # 0.25 vCPU (minimo Fargate)
+      Memory: '512' # 0.5 GB (minimo Fargate)
       TaskRoleArn: !Ref LabRoleArn # Rol para permisos DENTRO del contenedor (si necesita llamar a otros servicios AWS)
       ExecutionRoleArn: !Ref LabRoleArn # Rol para que ECS/Fargate pueda descargar imagen, enviar logs, etc.
       ContainerDefinitions:
-        - Name: !Sub "conversor-${EnvironmentName}-container"
+        - Name: !Sub 'conversor-${EnvironmentName}-container'
           Image: !Ref DockerImageUri # Imagen de Docker Hub
           PortMappings:
             - ContainerPort: 8000
@@ -156,35 +156,29 @@ Resources:
   ECSService:
     Type: AWS::ECS::Service
     Properties:
-      ServiceName: !Sub "conversor-${EnvironmentName}-service"
+      ServiceName: !Sub 'conversor-${EnvironmentName}-service'
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref ECSTaskDefinition
-      DesiredCount: 2 # Aumentamos a 2 para permitir rolling updates
+      DesiredCount: 1 # Numero inicial de tareas
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: ENABLED
-          Subnets: !Ref SubnetIds
+          AssignPublicIp: ENABLED # Necesario en subredes publicas sin NAT Gateway
+          Subnets: !Ref SubnetIds # Las mismas subredes publicas del ALB
           SecurityGroups:
             - !Ref ECSServiceSecurityGroup
       LoadBalancers:
-        - ContainerName: !Sub "conversor-${EnvironmentName}-container"
+        - ContainerName: !Sub 'conversor-${EnvironmentName}-container'
           ContainerPort: 8000
           TargetGroupArn: !Ref ECSTargetGroup
-      # Configuración para Rolling Update
+      # DesiredCount y TaskDefinition se actualizan en despliegues posteriores
       DeploymentConfiguration:
-        MinimumHealthyPercent: 50 # Mínimo 50% de tareas saludables durante el despliegue
-        MaximumPercent: 200 # Permitir hasta 200% de tareas durante el despliegue
-        DeploymentCircuitBreaker: # Circuit Breaker para detectar despliegues fallidos
-          Enable: true
-          Rollback: true # Habilitar rollback automático
-      # Controlador de despliegue tipo ECS (rolling update)
-      DeploymentController:
-        Type: ECS
+        MinimumHealthyPercent: 50 # Permite que baje al 50% durante el deploy
+        MaximumPercent: 200 # Permite que suba al 200% temporalmente
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
-    DependsOn:
+    DependsOn: # Asegura que el listener exista antes de crear el servicio
       - ALBListener
 
 Outputs:
@@ -192,29 +186,14 @@ Outputs:
     Description: DNS Name of the Application Load Balancer
     Value: !GetAtt ApplicationLoadBalancer.DNSName
     Export:
-      Name: !Sub "${AWS::StackName}-ALBDnsName"
+      Name: !Sub '${AWS::StackName}-ALBDnsName'
   ECSClusterName:
     Description: Name of the ECS Cluster
     Value: !Ref ECSCluster
     Export:
-      Name: !Sub "${AWS::StackName}-ECSClusterName"
-  ECSTaskDefinitionArn:
-    Description: ARN of the ECS Task Definition
-    Value: !Ref ECSTaskDefinition
-    Export:
-      Name: !Sub "${AWS::StackName}-ECSTaskDefinitionArn"
+      Name: !Sub '${AWS::StackName}-ECSClusterName'
   ECSServiceName:
-    Description: Nombre estándar del servicio ECS (para uso en CLI)
-    Value: !Sub "conversor-${EnvironmentName}-service"
+    Description: Name of the ECS Service
+    Value: !GetAtt ECSService.Name # Obtener el nombre completo del servicio
     Export:
-      Name: !Sub "${AWS::StackName}-ECSServiceName"
-  TargetGroupArn:
-    Description: ARN del Target Group para el servicio ECS
-    Value: !Ref ECSTargetGroup
-    Export:
-      Name: !Sub "${AWS::StackName}-TargetGroupArn"
-  ServiceSecurityGroupId:
-    Description: ID del Security Group para el servicio ECS
-    Value: !Ref ECSServiceSecurityGroup
-    Export:
-      Name: !Sub "${AWS::StackName}-ServiceSecurityGroupId"
+      Name: !Sub '${AWS::StackName}-ECSServiceName'
