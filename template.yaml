@@ -159,33 +159,29 @@ Resources:
       ServiceName: !Sub "conversor-${EnvironmentName}-service"
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref ECSTaskDefinition
-      DesiredCount: 2 # Aumentado a 2 para soportar rolling update sin downtime
+      DesiredCount: 1 # Mantener en 1 inicialmente
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: ENABLED # Necesario en subredes publicas sin NAT Gateway
-          Subnets: !Ref SubnetIds # Las mismas subredes publicas del ALB
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
           SecurityGroups:
             - !Ref ECSServiceSecurityGroup
       LoadBalancers:
         - ContainerName: !Sub "conversor-${EnvironmentName}-container"
           ContainerPort: 8000
           TargetGroupArn: !Ref ECSTargetGroup
-      # Configuración mejorada para Rolling Update
+      # Configuración básica para Rolling Update
       DeploymentConfiguration:
-        MinimumHealthyPercent: 50 # Permite que baje al 50% durante el deploy
-        MaximumPercent: 200 # Permite que suba al 200% temporalmente
-        # Nueva configuración para Circuit Breaker con Rollback automático
-        DeploymentCircuitBreaker:
-          Enable: true
-          Rollback: true
-      # Estrategia de despliegue Rolling Update
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      # Solo añadir el controlador por ahora
       DeploymentController:
         Type: ECS
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
-    DependsOn: # Asegura que el listener exista antes de crear el servicio
+    DependsOn:
       - ALBListener
 
 Outputs:
