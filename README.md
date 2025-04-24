@@ -78,3 +78,6 @@ pytest --ignore=tests/test_acceptance_app.py --ignore=tests/test_smoke_app.py
 
 # Tests de aceptación (requiere Flask en ejecución)
 pytest tests/test_acceptance_app.py
+```
+
+## Estrategias de Despliegue y Rollback
