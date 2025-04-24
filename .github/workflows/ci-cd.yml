@@ -208,18 +208,46 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }} # <--- USO DEL SESSION TOKEN
           aws-region: us-east-1
 
-      # 2. Forzar un nuevo despliegue en el servicio ECS de Staging
+      # 2. Forzar un nuevo despliegue en el servicio ECS de Staging (AHORA VÍA CFN)
       - name: Force New Deployment ECS Service Staging
         run: |
+          # Obtener el nombre del cluster y servicio de las salidas del job anterior
+          CLUSTER_NAME="${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }}"
+          SERVICE_NAME="${{ needs.deploy-cfn-staging.outputs.service_name_staging }}"
+
           echo "Forcing new deployment for Staging service..."
-          aws ecs update-service --cluster ${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }} \
-                                --service ${{ needs.deploy-cfn-staging.outputs.service_name_staging }} \
-                                --force-new-deployment \
-                                --region us-east-1
-          # Esperar a que el despliegue se estabilice
+          # Forzar una nueva implementación (incluso si la Task Definition no cambió)
+          aws ecs update-service \
+                   --cluster $CLUSTER_NAME \
+                   --service $SERVICE_NAME \
+                   --force-new-deployment \
+                   --region us-east-1
+                   
+          # Esperar a que el servicio se estabilice
           echo "Waiting for Staging service deployment to stabilize..."
-          aws ecs wait services-stable --cluster ${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }} --services ${{ needs.deploy-cfn-staging.outputs.service_name_staging }} --region us-east-1
+          aws ecs wait services-stable --cluster $CLUSTER_NAME --services $SERVICE_NAME --region us-east-1
           echo "Staging service deployment stable."
+
+      # 3. Monitorear el despliegue y verificar el Circuit Breaker
+      - name: Monitor Deployment Status
+        run: |
+          CLUSTER_NAME="${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }}"
+          SERVICE_NAME="${{ needs.deploy-cfn-staging.outputs.service_name_staging }}"
+
+          # Obtener y mostrar información sobre el despliegue
+          DEPLOYMENT_INFO=$(aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --query "services[0].deployments")
+          echo "Deployment Info:"
+          echo "$DEPLOYMENT_INFO" | jq
+
+          # Verificar si el Circuit Breaker está habilitado
+          CIRCUIT_BREAKER=$(aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --query "services[0].deploymentConfiguration.deploymentCircuitBreaker")
+          echo "Circuit Breaker Configuration:"
+          echo "$CIRCUIT_BREAKER" | jq
+
+          # Mostrar el número de tareas en ejecución y su estado
+          TASKS=$(aws ecs list-tasks --cluster $CLUSTER_NAME --service-name $SERVICE_NAME --query "taskArns")
+          echo "Tasks running:"
+          echo "$TASKS" | jq length
 
   # -------------------------------------
   # Job de Pruebas de Aceptación en Staging
@@ -264,8 +292,8 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs: # Definir salida para la URL del ALB de producción
       alb_url_prod: ${{ steps.get_stack_outputs.outputs.alb_url }}
-      cluster_name_prod: "conversor-production-cluster"
-      service_name_prod: "conversor-production-service"
+      cluster_name_prod: ${{ steps.get_stack_outputs.outputs.cluster_name }}
+      service_name_prod: ${{ steps.get_stack_outputs.outputs.service_name }}
 
     steps:
       # 1. Checkout del código
@@ -343,18 +371,46 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }} # <--- USO DEL SESSION TOKEN
           aws-region: us-east-1
 
-      # 2. Forzar un nuevo despliegue en el servicio ECS de Producción
+      # 2. Forzar un nuevo despliegue en el servicio ECS de Producción (AHORA VÍA CFN)
       - name: Force New Deployment ECS Service Production
         run: |
+          # Obtener el nombre del cluster y servicio de las salidas del job anterior
+          CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
+          SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
+
           echo "Forcing new deployment for Production service..."
-          aws ecs update-service --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} \
-                                --service ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} \
-                                --force-new-deployment \
-                                --region us-east-1
-          # Esperar a que el despliegue se estabilice
+          # Forzar una nueva implementación (incluso si la Task Definition no cambió)
+          aws ecs update-service \
+                   --cluster $CLUSTER_NAME \
+                   --service $SERVICE_NAME \
+                   --force-new-deployment \
+                   --region us-east-1
+                   
+          # Esperar a que el servicio se estabilice
           echo "Waiting for Production service deployment to stabilize..."
-          aws ecs wait services-stable --cluster ${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }} --services ${{ needs.deploy-cfn-prod.outputs.service_name_prod }} --region us-east-1
+          aws ecs wait services-stable --cluster $CLUSTER_NAME --services $SERVICE_NAME --region us-east-1
           echo "Production service deployment stable."
+
+      # 3. Monitorear el despliegue y verificar el Circuit Breaker
+      - name: Monitor Deployment Status
+        run: |
+          CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
+          SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
+
+          # Obtener y mostrar información sobre el despliegue
+          DEPLOYMENT_INFO=$(aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --query "services[0].deployments")
+          echo "Deployment Info:"
+          echo "$DEPLOYMENT_INFO" | jq
+
+          # Verificar si el Circuit Breaker está habilitado
+          CIRCUIT_BREAKER=$(aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --query "services[0].deploymentConfiguration.deploymentCircuitBreaker")
+          echo "Circuit Breaker Configuration:"
+          echo "$CIRCUIT_BREAKER" | jq
+
+          # Mostrar el número de tareas en ejecución y su estado
+          TASKS=$(aws ecs list-tasks --cluster $CLUSTER_NAME --service-name $SERVICE_NAME --query "taskArns")
+          echo "Tasks running:"
+          echo "$TASKS" | jq length
 
   # -------------------------------------
   # Job de Pruebas de Humo en Producción
@@ -394,7 +450,7 @@ jobs:
   # Job de Rollback Manual para Producción
   # -------------------------------------
   rollback-prod:
-    needs: [deploy-cfn-prod]
+    needs: [deploy-cfn-prod, update-service-prod]
     runs-on: ubuntu-latest
     if: failure() && contains(github.event.head_commit.message, '[rollback]')
 

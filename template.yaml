@@ -159,7 +159,7 @@ Resources:
       ServiceName: !Sub "conversor-${EnvironmentName}-service"
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref ECSTaskDefinition
-      DesiredCount: 1 # Mantener en 1 inicialmente
+      DesiredCount: 2 # Aumentamos a 2 para permitir rolling updates
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
@@ -171,11 +171,14 @@ Resources:
         - ContainerName: !Sub "conversor-${EnvironmentName}-container"
           ContainerPort: 8000
           TargetGroupArn: !Ref ECSTargetGroup
-      # Configuración básica para Rolling Update
+      # Configuración para Rolling Update
       DeploymentConfiguration:
-        MinimumHealthyPercent: 50
-        MaximumPercent: 200
-      # Solo añadir el controlador por ahora
+        MinimumHealthyPercent: 50 # Mínimo 50% de tareas saludables durante el despliegue
+        MaximumPercent: 200 # Permitir hasta 200% de tareas durante el despliegue
+        DeploymentCircuitBreaker: # Circuit Breaker para detectar despliegues fallidos
+          Enable: true
+          Rollback: true # Habilitar rollback automático
+      # Controlador de despliegue tipo ECS (rolling update)
       DeploymentController:
         Type: ECS
       Tags:
@@ -195,8 +198,23 @@ Outputs:
     Value: !Ref ECSCluster
     Export:
       Name: !Sub "${AWS::StackName}-ECSClusterName"
+  ECSTaskDefinitionArn:
+    Description: ARN of the ECS Task Definition
+    Value: !Ref ECSTaskDefinition
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSTaskDefinitionArn"
   ECSServiceName:
-    Description: Name of the ECS Service
-    Value: !GetAtt ECSService.Name # Obtener el nombre completo del servicio
+    Description: Nombre estándar del servicio ECS (para uso en CLI)
+    Value: !Sub "conversor-${EnvironmentName}-service"
     Export:
       Name: !Sub "${AWS::StackName}-ECSServiceName"
+  TargetGroupArn:
+    Description: ARN del Target Group para el servicio ECS
+    Value: !Ref ECSTargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-TargetGroupArn"
+  ServiceSecurityGroupId:
+    Description: ID del Security Group para el servicio ECS
+    Value: !Ref ECSServiceSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ServiceSecurityGroupId"
