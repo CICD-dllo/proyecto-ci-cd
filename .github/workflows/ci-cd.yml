@@ -501,7 +501,7 @@ jobs:
 
           # Eliminar campos que no se deben incluir al registrar una nueva tarea
           echo "Cleaning task definition for registration..."
-          CLEANED_TASK_DEF=$(echo $PREV_TASK_DEF | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          CLEANED_TASK_DEF=$(echo $PREV_TASK_DEF | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)')
 
           echo "Creating new task definition from previous version"
 
