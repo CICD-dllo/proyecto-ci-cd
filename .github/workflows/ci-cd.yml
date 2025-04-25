@@ -459,22 +459,44 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Obtener todo el historial de commits
+
       - name: Rollback Production Stack
         id: rollback
         run: |
-          echo "Iniciando rollback del stack de Producción..."
-          if aws cloudformation rollback-stack --stack-name conversor-prod-stack; then
-            echo "Esperando a que el rollback se complete..."
-            if aws cloudformation wait stack-rollback-complete --stack-name conversor-prod-stack; then
-              echo "Rollback de Producción completado exitosamente"
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "Error esperando el rollback de Producción"
-              echo "status=failure" >> $GITHUB_OUTPUT
-              exit 1
-            fi
+          echo "Iniciando rollback de Producción debido a fallo en smoke tests..."
+          
+          # Obtener la última versión exitosa de la imagen
+          LAST_SUCCESSFUL_IMAGE=$(aws ecs describe-task-definition --task-definition conversor-production-task --query "taskDefinition.containerDefinitions[0].image" --output text)
+          echo "Última versión exitosa de la imagen: $LAST_SUCCESSFUL_IMAGE"
+          
+          # Obtener el commit hash de la última versión estable
+          LAST_STABLE_COMMIT=$(git log --grep="status=success" -1 --pretty=format:"%H")
+          echo "Último commit estable: $LAST_STABLE_COMMIT"
+          
+          # Obtener el template del último commit estable
+          git checkout $LAST_STABLE_COMMIT template.yaml
+          echo "Template restaurado del último commit estable"
+          
+          # Actualizar el stack con la última versión exitosa
+          echo "Actualizando stack con la última versión exitosa..."
+          if aws cloudformation deploy \
+            --template-file template.yaml \
+            --stack-name conversor-prod-stack \
+            --parameter-overrides \
+              EnvironmentName=production \
+              DockerImageUri=$LAST_SUCCESSFUL_IMAGE \
+              LabRoleArn=${{ secrets.LAB_ROLE_ARN }} \
+              VpcId=${{ secrets.VPC_ID }} \
+              SubnetIds="${{ secrets.SUBNET_IDS }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM; then
+            echo "Stack actualizado exitosamente con la última versión estable"
+            echo "status=success" >> $GITHUB_OUTPUT
           else
-            echo "Error iniciando el rollback de Producción"
+            echo "Error actualizando el stack con la última versión estable"
             echo "status=failure" >> $GITHUB_OUTPUT
             exit 1
           fi
