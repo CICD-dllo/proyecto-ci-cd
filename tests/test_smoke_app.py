@@ -33,8 +33,8 @@ def test_smoke_test(browser):
         assert h1_element.text == "Conversor de Unidades de Tiempo" # Verifica el texto del H1
         
         # Reactivamos la aserción que siempre fallará para probar el rollback
-        # print("PRUEBA DE ROLLBACK: Esta aserción fallará intencionalmente")
-        # assert False, "Fallo intencional para probar el mecanismo de rollback [rollback]"
+        print("PRUEBA DE ROLLBACK: Esta aserción fallará intencionalmente")
+        assert False, "Fallo intencional para probar el mecanismo de rollback [rollback]"
         
         print("Smoke test pasado exitosamente.")
     except Exception as e:
