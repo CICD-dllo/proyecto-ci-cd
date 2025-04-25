@@ -79,18 +79,15 @@ jobs:
       # --- Pasos de Docker (solo en push a main) ---
 
       # 9. Configurar QEMU (para buildx multi-plataforma, aunque no lo usemos explícitamente)
-      - name: Set up QEMU
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Set up QEMU        
         uses: docker/setup-qemu-action@v3
 
       # 10. Configurar Docker Buildx (constructor avanzado)
-      - name: Set up Docker Buildx
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Set up Docker Buildx        
         uses: docker/setup-buildx-action@v3
 
       # 11. Iniciar sesión en Docker Hub
-      - name: Login to Docker Hub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Login to Docker Hub        
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -98,8 +95,7 @@ jobs:
 
       # 12. Construir y pushear imagen Docker a Docker Hub
       - name: Build and push Docker image
-        id: docker_build_push # Darle ID para referenciar output
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: docker_build_push # Darle ID para referenciar output        
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -113,8 +109,7 @@ jobs:
 
       # 13. Establecer las salidas del job usadas para el despliegue
       - name: Set Job Outputs
-        id: set_outputs
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: set_outputs        
         run: |
           echo "repo_name=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
           echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
@@ -125,8 +120,7 @@ jobs:
   # -------------------------------------
   deploy-cfn-staging:
     needs: build-test-publish # Depende del job anterior (necesita image_uri)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Solo en push a main
+    runs-on: ubuntu-latest    
     outputs:
       alb_url_staging: ${{ steps.get_stack_outputs.outputs.alb_url }}
       cluster_name_staging: "conversor-staging-cluster"
@@ -196,8 +190,7 @@ jobs:
   update-service-staging:
     # Depende de que CFN haya actualizado la Task Definition
     needs: [build-test-publish, deploy-cfn-staging]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest    
 
     steps:
       # 1. Configurar credenciales de AWS (CON SESSION TOKEN)
@@ -226,9 +219,10 @@ jobs:
   # Job de Pruebas de Aceptación en Staging
   # -------------------------------------
   test-staging:
-    needs: [update-service-staging, deploy-cfn-staging] # Depende de que el servicio esté estable con la nueva versión
+    needs: [update-service-staging, deploy-cfn-staging]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      test_status: ${{ steps.test_status.outputs.status }}
 
     steps:
       # 1. Checkout del código (para acceder a las pruebas)
@@ -249,20 +243,71 @@ jobs:
 
       # 4. Ejecutar pruebas de aceptación contra el entorno de Staging
       - name: Run Acceptance Tests against Staging
+        id: test_status
         env:
-          APP_BASE_URL: ${{ needs.deploy-cfn-staging.outputs.alb_url_staging }} # URL del ALB de Staging desde salidas
+          APP_BASE_URL: ${{ needs.deploy-cfn-staging.outputs.alb_url_staging }}
         run: |
           echo "Running acceptance tests against: $APP_BASE_URL"
-          sleep 30 # Espera prudencial para el registro del target en el ALB
-          pytest tests/test_acceptance_app.py # Ejecutar las pruebas de aceptación
+          sleep 30
+          if pytest tests/test_acceptance_app.py; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  # -------------------------------------
+  # Job de Rollback Staging
+  # -------------------------------------
+  rollback-staging:
+    needs: test-staging
+    runs-on: ubuntu-latest
+    if: needs.test-staging.outputs.test_status == 'failure'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Rollback Staging Stack
+        id: rollback
+        run: |
+          echo "Iniciando rollback del stack de Staging..."
+          if aws cloudformation rollback-stack --stack-name conversor-staging-stack; then
+            echo "Esperando a que el rollback se complete..."
+            if aws cloudformation wait stack-rollback-complete --stack-name conversor-staging-stack; then
+              echo "Rollback de Staging completado exitosamente"
+              echo "status=success" >> $GITHUB_OUTPUT
+            else
+              echo "Error esperando el rollback de Staging"
+              echo "status=failure" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          else
+            echo "Error iniciando el rollback de Staging"
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Notify Rollback Status
+        if: always()
+        run: |
+          if [ "${{ steps.rollback.outputs.status }}" == "success" ]; then
+            echo "Rollback de Staging completado exitosamente"
+          else
+            echo "Falló el rollback de Staging - Se requiere intervención manual"
+          fi
 
   # -------------------------------------
   # Job de Despliegue CloudFormation Producción
   # -------------------------------------
   deploy-cfn-prod:
     needs: [build-test-publish, test-staging] # Depende de la imagen y de que Staging esté OK
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest    
     outputs: # Definir salida para la URL del ALB de producción
       alb_url_prod: ${{ steps.get_stack_outputs.outputs.alb_url }}
       cluster_name_prod: "conversor-production-cluster"
@@ -331,8 +376,7 @@ jobs:
   # -------------------------------------
   update-service-prod:
     needs: [build-test-publish, deploy-cfn-prod] # Depende de que CFN haya actualizado la Task Def de Prod
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest    
 
     steps:
       # 1. Configurar credenciales de AWS (CON SESSION TOKEN)
@@ -361,9 +405,10 @@ jobs:
   # Job de Pruebas de Humo en Producción
   # -------------------------------------
   smoke-test-prod:
-    needs: [update-service-prod, deploy-cfn-prod] # Depende de que el servicio de prod esté estable
+    needs: [update-service-prod, deploy-cfn-prod]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      test_status: ${{ steps.test_status.outputs.status }}
 
     steps:
       # 1. Checkout del código
@@ -384,9 +429,61 @@ jobs:
 
       # 4. Ejecutar pruebas de humo contra el entorno de Producción
       - name: Run Smoke Tests against Production
+        id: test_status
         env:
-          APP_BASE_URL: ${{ needs.deploy-cfn-prod.outputs.alb_url_prod }} # URL del ALB de Producción desde salidas
+          APP_BASE_URL: ${{ needs.deploy-cfn-prod.outputs.alb_url_prod }}
         run: |
           echo "Running smoke tests against: $APP_BASE_URL"
-          sleep 30 # Espera prudencial
-          pytest tests/test_smoke_app.py # Ejecutar las pruebas de humo
+          sleep 30
+          if pytest tests/test_smoke_app.py; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  # -------------------------------------
+  # Job de Rollback Producción
+  # -------------------------------------
+  rollback-production:
+    needs: smoke-test-prod
+    runs-on: ubuntu-latest
+    if: needs.smoke-test-prod.outputs.test_status == 'failure'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Rollback Production Stack
+        id: rollback
+        run: |
+          echo "Iniciando rollback del stack de Producción..."
+          if aws cloudformation rollback-stack --stack-name conversor-prod-stack; then
+            echo "Esperando a que el rollback se complete..."
+            if aws cloudformation wait stack-rollback-complete --stack-name conversor-prod-stack; then
+              echo "Rollback de Producción completado exitosamente"
+              echo "status=success" >> $GITHUB_OUTPUT
+            else
+              echo "Error esperando el rollback de Producción"
+              echo "status=failure" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          else
+            echo "Error iniciando el rollback de Producción"
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Notify Rollback Status
+        if: always()
+        run: |
+          if [ "${{ steps.rollback.outputs.status }}" == "success" ]; then
+            echo "Rollback de Producción completado exitosamente"
+          else
+            echo "Falló el rollback de Producción - Se requiere intervención manual"
+          fi
