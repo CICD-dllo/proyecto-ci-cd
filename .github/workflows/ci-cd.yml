@@ -448,7 +448,7 @@ jobs:
   rollback-production:
     needs: smoke-test-prod
     runs-on: ubuntu-latest
-    if: needs.smoke-test-prod.outputs.test_status == 'failure'
+    if: always() && needs.smoke-test-prod.outputs.test_status == 'failure'
 
     steps:
       - name: Configure AWS Credentials
