@@ -81,3 +81,4 @@ pytest tests/test_acceptance_app.py
 ```
 
 ## Estrategias de Despliegue y Rollback
+rollback
