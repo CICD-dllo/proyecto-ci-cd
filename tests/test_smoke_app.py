@@ -27,12 +27,12 @@ def test_smoke_test(browser):
         browser.get(app_url + "/")
         print(f"Título de la página: {browser.title}")
         
-        if False: #condicional para simular un fallo
+        if True: #condicional para simular un fallo
             # Verifica que el título contenga "Conversor de Unidades de Tiempo"
             assert "Conversor de Unidades de Tiempo" in browser.title
         else:
             # Forzamos un fallo cambiando la aserción para que busque un título incorrecto
-            assert "Título Incorrecto" in browser.title
+            assert False
 
         h1_element = browser.find_element(By.TAG_NAME, "h1")
         print(f"Texto H1: {h1_element.text}")
