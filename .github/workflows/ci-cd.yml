@@ -427,6 +427,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 3.1 Simular un fallo intencional
+      - name: Simulate Failure
+        run: |
+          echo "Simulando un fallo intencional para probar el rollback..."
+          exit 1
+
       # 4. Ejecutar pruebas de humo contra el entorno de Producción
       - name: Run Smoke Tests against Production
         id: test_status

@@ -38,6 +38,3 @@ def test_smoke_test(browser):
         # browser.save_screenshot('smoke_test_failure.png')
          # Vuelve a lanzar la excepción para que pytest marque el test como fallido
         raise
-
-def fake_test():
-    assert False
