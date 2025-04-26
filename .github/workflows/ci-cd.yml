@@ -455,6 +455,19 @@ jobs:
             exit 1
           fi
 
+      - name: Force New Deployment ECS Service
+        if: steps.rollback.outputs.status == 'success'
+        run: |
+          echo "Forzando nuevo despliegue en el servicio ECS de Producción..."
+          aws ecs update-service --cluster conversor-production-cluster \
+                                --service conversor-production-service \
+                                --force-new-deployment \
+                                --region us-east-1
+          # Esperar a que el despliegue se estabilice
+          echo "Esperando a que el despliegue se estabilice..."
+          aws ecs wait services-stable --cluster conversor-production-cluster --services conversor-production-service --region us-east-1
+          echo "Despliegue estabilizado."
+
       - name: Notify Rollback Status
         if: always()
         run: |
