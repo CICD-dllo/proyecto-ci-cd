@@ -81,4 +81,21 @@ pytest tests/test_acceptance_app.py
 ```
 
 ## Estrategias de Despliegue y Rollback
-rollback
+
+El proyecto implementa un enfoque robusto de despliegue y rollback:
+
+### Despliegue
+- Utiliza ECS Fargate con estrategia de despliegue rolling update
+- Mantiene al menos el 50% de las tareas en funcionamiento durante los despliegues
+- Circuit Breaker detecta despliegues fallidos automáticamente
+
+### Rollback
+- **Automático**: Si una nueva versión falla las pruebas de humo, se activa el mecanismo de rollback
+- **Manual**: Se puede forzar un rollback incluyendo `[rollback]` en el mensaje del commit
+- **Proceso**:
+  1. Obtiene la Task Definition anterior de ECS
+  2. Registra una nueva definición basada en la versión anterior
+  3. Actualiza el servicio para usar la versión recuperada
+  4. Verifica que el servicio esté estable después del rollback
+
+Este mecanismo asegura alta disponibilidad y rápida recuperación ante fallos, minimizando el tiempo de interrupción del servicio.
